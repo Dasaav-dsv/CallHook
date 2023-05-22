@@ -1,6 +1,6 @@
 # CallHook
 ## An x86-64 function call hooking library.
-CallHook is a simple to include and use C++17 function and function call hooking library, designed for non-invasive hooking by redirecting existing calls. Uses [Zydis](https://github.com/zyantific/zydis) for disassembly.
+CallHook is a simple to include and use C++17 function and function call hooking library, designed for non-invasive hooking by safely redirecting existing calls. Uses [Zydis](https://github.com/zyantific/zydis) for disassembly.
 
 ## How and why?
 CallHook aims to make hooking functions less invasive by redirecting existing function calls - meaning it targets incoming call instructions instead of the function prologue.
@@ -10,6 +10,7 @@ This approach has several advantages over injecting trampolines:
 3. Hook templates - hook before and after a function call, override the return value, the function call or capture the entire context as if using breakpoints (no actual debugger needed!)
 4. Choose where you hook - hooking individual calls allows for greater control over the control flow of the program. 
 5. Every call is a goal (almost) - use calls as safe injection points, you might not even need the function you hook, but its location in the surrounding code.
+6. Hook functions which are shorter than 5 bytes (impossible with a regular trampoline hook)
 
 ## How to use:
 Include CallHook.h (if not using MSVC, you must statically link the two Zydis libraries found in thirdparty/Zydis to your project)
