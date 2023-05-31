@@ -27,7 +27,7 @@ namespace CallHook {
 		else {
 			moduleName = std::string(lpModuleName);
 		}
-		logger.log("Allocating %d bytes near module %s", cb, moduleName);
+		logger.log("Allocating %d bytes near module %s", cb, moduleName.c_str());
 		MODULEINFO modInfo{};
 		MEMORY_BASIC_INFORMATION memInfo{};
 		if (HMODULE hModule = GetModuleHandleA(moduleName.c_str())) {
