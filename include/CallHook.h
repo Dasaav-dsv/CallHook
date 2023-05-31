@@ -36,13 +36,14 @@ public:
 
 	// Unhooks a function, restoring the original function pointer while preserving the hook chain (if it exists)
 	virtual ~CallHookTemplate() {
+		auto& logger = CallHook::Logger::get();
 		HookType* hook = reinterpret_cast<HookType*>(allocationBase);
 		if (!hook) {
-			CallHook::Logger::get().log("Error: unable to unhook call, it has no associated memory");
+			logger.log("Error: unable to unhook call, it has no associated memory");
 			return;
 		}
 		else {
-			CallHook::Logger::get().log("Unhooking call at %p", reinterpret_cast<void*>(hook->hookData.previous));
+			logger.log("Unhooking call at %p", reinterpret_cast<void*>(hook->hookData.previous));
 		}
 
 		// Find the topmost in the chain hook.
@@ -70,15 +71,19 @@ public:
 				CallHookTemplate::rdataWrite(&prevHook->hookData.fnHooked, hook->hookData.fnHooked);
 			}
 			else {
-				uint8_t callType = *reinterpret_cast<uint8_t*>(prevHook) ^ 0xE8;
-				if (callType <= 1) {
-					CallHook::CallPatcher::get().patchCall(prevHook, hook->hookData.fnHooked, callType);
+				std::unique_ptr<CallHook::Decoder> decoder;
+				try {
+					decoder = std::make_unique<CallHook::Decoder>();
+					ZydisDecodedInstruction inst;
+					if (decoder->decodeInstruction(reinterpret_cast<uint8_t*>(prevHook), inst)) {
+						CallHook::CallPatcher::get().patchCall(prevHook, hook->hookData.fnHooked, *reinterpret_cast<uint8_t*>(prevHook), inst.raw.imm->offset);
+					}
 				}
-				else {
-					CallHook::Logger::get().log("Error: unable to unhook call - unrecognized hooking template");
+				catch (const std::runtime_error&) {
+					logger.log("Error: unable to initialize Zydis instruction decoder.");
 				}
 			}
-			CallHook::Logger::get().log("Successfully unhooked call at %p", reinterpret_cast<void*>(prevHook));
+			logger.log("Successfully unhooked call at %p", reinterpret_cast<void*>(prevHook));
 		}
 
 		// Destroy the hook and free the memory.
@@ -109,8 +114,7 @@ private:
 		this->allocationBase = allocationBase;
 		HookType* hook = new(allocationBase) HookType{};
 
-		uint8_t callType = *reinterpret_cast<uint8_t*>(callAddress) ^ 0xE8u;
-		if (callType > 1) return;
+		uint8_t byte = *reinterpret_cast<uint8_t*>(callAddress);
 
 		void* hooked = getFunctionFromCall(callAddress);
 
@@ -137,14 +141,34 @@ private:
 			}
 			CallHookTemplate::rdataWrite(&prevHook->hookData.previous, hook);
 			// Write the displacement of the hook to the call that is being hooked.
-			patcher.patchCall(callAddress, reinterpret_cast<uint8_t*>(hook) + sizeof(HookBase), callType);
+			std::unique_ptr<CallHook::Decoder> decoder;
+			try {
+				decoder = std::make_unique<CallHook::Decoder>();
+				ZydisDecodedInstruction inst;
+				if (decoder->decodeInstruction(callAddress, inst)) {
+					CallHook::CallPatcher::get().patchCall(callAddress, reinterpret_cast<uint8_t*>(hook) + sizeof(HookBase), byte, inst.raw.imm->offset);
+				}
+			}
+			catch (const std::runtime_error&) {
+				logger.log("Error: unable to initialize Zydis instruction decoder.");
+			}
 		}
 		else {
 			_mm_mfence();
 			if (hook->hookData.fnHooked != hooked) hook->hookData.fnHooked = hooked;
 
 			// Write the displacement of the hook to the call that is being hooked.
-			patcher.patchCall(callAddress, reinterpret_cast<uint8_t*>(hook) + sizeof(HookBase), callType);
+			std::unique_ptr<CallHook::Decoder> decoder;
+			try {
+				decoder = std::make_unique<CallHook::Decoder>();
+				ZydisDecodedInstruction inst;
+				if (decoder->decodeInstruction(callAddress, inst)) {
+					CallHook::CallPatcher::get().patchCall(callAddress, reinterpret_cast<uint8_t*>(hook) + sizeof(HookBase), byte, inst.raw.imm->offset);
+				}
+			}
+			catch (const std::runtime_error&) {
+				logger.log("Error: unable to initialize Zydis instruction decoder.");
+			}
 		}
 		logger.log("Successfully hooked call at %p", callAddress);
 	}
@@ -203,9 +227,8 @@ namespace CallHook {
 							while (fnCur < fnEnd) {
 								ZydisDecodedInstruction inst;
 								if (decoder->decodeInstruction(fnCur, inst)) {
-									// 0xE8 and 0xE9 - 32-bit relative call and jump.
-									if ((inst.opcode & 0xFE) == 0xE8 && inst.length == 5) {
-										PEParser::ibo32 callTarget = PEParser::ibo32(fnCur + *reinterpret_cast<int*>(fnCur + 1) + 5);
+									if (inst.raw.imm->is_relative && inst.raw.imm->size == 32) {
+										PEParser::ibo32 callTarget = fnCur + inst.length + inst.raw.imm->value.s;
 										if (!(callTarget & 0x0F)) {
 											// We only want to hook in-module calls, or calls hooked by other CallHook instances.
 											if (!PEParser::isIbo32InSection(callTarget, ".text")) {
@@ -213,12 +236,12 @@ namespace CallHook {
 												MEMORY_BASIC_INFORMATION mbi;
 												// Check if memory is accessible.
 												if (!VirtualQueryEx((HANDLE)-1, (LPVOID)hookBase, &mbi, sizeof(mbi)) || (mbi.Protect & PAGE_NOACCESS) == 1) {
-													fnCur += 5;
+													fnCur += inst.length;
 													continue;
 												}
 												// magic: "UniHook\0"
 												if (hookBase->magic != 0x6B6F6F48696E55ull) {
-													fnCur += 5;
+													fnCur += inst.length;
 													continue;
 												}
 											}
@@ -277,7 +300,10 @@ namespace CallHook {
 					}
 					// Add a key-value pair of a function address and a pointer to the position
 					// inside the vector that holds the incoming function calls.
-					if (callCount >= 0) this->map[function] = &*std::next(this->underlying.rbegin(), std::max(calls.size() - 1, 0ull));
+					if (callCount >= 0) {
+						auto iter = std::next(this->underlying.end(), -static_cast<int64_t>(calls.size()));
+						if (iter != this->underlying.end()) this->map[function] = &*iter;
+					}
 				}
 				// After populating the map and the underlying memory vector, the call count should be back at zero.
 				// A negative call count would mean calls were not able to be added because doing so would cause a relocation.
@@ -368,6 +394,7 @@ namespace CallHook {
 		}
 		else {
 			logger.log("Successfully initialized CallHook");
+			return true;
 		}
 	}
 
