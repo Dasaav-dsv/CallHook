@@ -288,8 +288,8 @@ public:
 	/// <param name="address">: the address to be checked</param>
 	/// <param name="sections">: name of the section(s)</param>
 	/// <returns>true if address is in one of the sections, otherwise false</returns>
-	template <typename T> bool isAddressInSection(T* address, std::string name) {
-		return isAddressInSection(address, this->getSectionsWithName(name));
+	template <typename T> static bool isAddressInSection(T* address, std::string name) {
+		return isAddressInSection(address, PEParser::getSectionsWithName(name));
 	}
 
 	/// <summary>
