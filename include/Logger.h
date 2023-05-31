@@ -80,7 +80,7 @@ namespace CallHook {
 			else {
 				strcat_s(loggerDir, this->loggerDir);
 			}
-			CreateDirectoryA("logs", NULL);
+			CreateDirectoryA("log", NULL);
 			CreateDirectoryA(loggerDir, NULL);
 			// Append the full log path.
 			// Attempt to open or create a log file.
@@ -107,6 +107,6 @@ namespace CallHook {
 		
 		static inline FILE* logFile{};
 		std::string moduleName;
-		static constexpr const char* loggerDir = "logs\\CallHook\\";
+		static constexpr const char* loggerDir = "log\\CallHook\\";
 	};
 }
