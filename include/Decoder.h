@@ -44,7 +44,7 @@ namespace CallHook {
 		}
 
 		// Attempt to decode a single instruction at an address.
-		bool decodeInstruction(uint8_t* address, ZydisDecodedInstruction& instruction) noexcept {
+		bool decodeInstruction(void* address, ZydisDecodedInstruction& instruction) noexcept {
 			ZyanStatus status = ZydisDecoderDecodeInstruction(Decoder::decoder, nullptr, address, 15, &instruction);
 			return ZYAN_SUCCESS(status);
 		}
