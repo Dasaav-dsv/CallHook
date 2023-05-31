@@ -36,8 +36,8 @@ void spEffectParamHook(SpEffectOut& out, int paramId) {
     // If it does, we have an id overlap we need to log (only once).
     if (out.paramEntry != nullptr && overlapErr == false) {
         // Get the logger instance (singleton).
-        // CallHook comes with a logger class that saves the logs in logs\CallHook inside the main module's (process's) directory.
-        // So, \ELDEN RING\Game\logs\CallHook\callhookexample.log for this example. 
+        // CallHook comes with a logger class that saves the logs in log\CallHook inside the main module's (process's) directory.
+        // So, \ELDEN RING\Game\log\CallHook\callhookexample.log for this example. 
         // Also, it prints to console (and allocates one if building in debug mode).
         CallHook::Logger& logger = CallHook::Logger::get();
         logger.log("Error: SpEffect %d overlaps another one with the same id. This means another mod has already added this SpEffect entry", paramId);
