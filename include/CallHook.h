@@ -165,11 +165,16 @@ namespace CallHook {
 	// The target module is specified by the PEParser. It can be initialized with CallHook::initialize,
 	// which must be called prior to creating CallMap instances.
 	class CallMap {
+		struct PdataEntry {
+			PEParser::ibo32 start;
+			PEParser::ibo32 end;
+			PEParser::ibo32 unwind;
+		};
 	public:
 		CallMap() {
 			auto& logger = CallHook::Logger::get();
 			// Get the .text sections to scan for non-virtual function calls.
-			if (auto sections = PEParser::getSectionsWithName(".text")) {
+			if (auto sections = PEParser::getSectionsWithName(".pdata")) {
 				// A map to store function address/incoming call pairs.
 				// It is temporary and does not use a continuous memory allocation. 
 				std::map<PEParser::ibo32, std::vector<PEParser::ibo32>> rawCalls;
@@ -187,76 +192,60 @@ namespace CallHook {
 					logger.log("Error: unable to initialize Zydis instruction decoder.");
 					return;
 				}
-				// A module may have multiple .text sections. Iterate over all of them.
+				// A module may have multiple sections of the same name. Iterate over all of them.
 				for (auto& section : *sections) {
-					logger.log("Mapping calls for section starting at %p, size %X", section->start.as<void*>(), section->size);
-					ZydisDecodedInstruction inst;
-					uint8_t* base = reinterpret_cast<uint8_t*>(PEParser::getProcessInfo()->mInfo->lpBaseOfDll);
-					uint8_t* addr = section->start.as<uint8_t*>();
-					uint8_t* end = section->end.as<uint8_t*>();
-					// Traverse the section, incrementing the pointer by disassembling individual instuctions.
-					while (addr < end) {
-						if (decoder->decodeInstruction(addr, inst)) {
-							// 0xE8 - 32-bit relative call.
-							if (inst.opcode == 0xE8 && inst.length == 5) {
-								PEParser::ibo32 callTarget = PEParser::ibo32(addr + *reinterpret_cast<int*>(addr + 1) + 5);
-								// We only want to hook in-module calls.
-								if (!PEParser::isIbo32InSection(callTarget, ".text")) {
-									addr += 5;
-									continue;
-								}
-								// If a found call targets a function that already exists in the map,
-								// add its address to the vector. If a function address is not yet in the map,
-								// add it to the map. Increment the call count used for allocating memory later.
-								auto iter = rawCalls.find(callTarget);
-								if (iter != rawCalls.end()) {
-									iter->second.push_back(PEParser::ibo32(addr));
-									++callCount;
+					auto cur = section->start.as<PdataEntry*>();
+					auto end = section->end.as<PdataEntry*>();
+					while (cur < end) {
+						auto fnCur = cur->start.as<uint8_t*>();
+						auto fnEnd = cur->end.as<uint8_t*>();
+						if (PEParser::isAddressInSection(fnCur, ".text") && PEParser::isAddressInSection(fnEnd, ".text") && fnCur < fnEnd) {
+							while (fnCur < fnEnd) {
+								ZydisDecodedInstruction inst;
+								if (decoder->decodeInstruction(fnCur, inst)) {
+									// 0xE8 and 0xE9 - 32-bit relative call and jump.
+									if ((inst.opcode & 0xFE) == 0xE8 && inst.length == 5) {
+										PEParser::ibo32 callTarget = PEParser::ibo32(fnCur + *reinterpret_cast<int*>(fnCur + 1) + 5);
+										if (!(callTarget & 0x0F)) {
+											// We only want to hook in-module calls, or calls hooked by other CallHook instances.
+											if (!PEParser::isIbo32InSection(callTarget, ".text")) {
+												HookBase* hookBase = reinterpret_cast<HookBase*>(callTarget.as<uint8_t*>() - sizeof(HookBase));
+												MEMORY_BASIC_INFORMATION mbi;
+												// Check if memory is accessible.
+												if (!VirtualQueryEx((HANDLE)-1, (LPVOID)hookBase, &mbi, sizeof(mbi)) || (mbi.Protect & PAGE_NOACCESS) == 1) {
+													fnCur += 5;
+													continue;
+												}
+												// magic: "UniHook\0"
+												if (hookBase->magic != 0x6B6F6F48696E55ull) {
+													fnCur += 5;
+													continue;
+												}
+											}
+											// If a found call targets a function that already exists in the map,
+											// add its address to the vector. If a function address is not yet in the map,
+											// add it to the map. Increment the call count used for allocating memory later.
+											auto iter = rawCalls.find(callTarget);
+											if (iter != rawCalls.end()) {
+												iter->second.push_back(PEParser::ibo32(fnCur));
+												++callCount;
+											}
+											else {
+												rawCalls[callTarget] = std::vector<PEParser::ibo32>{ PEParser::ibo32(fnCur) };
+												++callCount;
+											}
+										}
+									}
+									fnCur += inst.length;
 								}
 								else {
-									rawCalls[callTarget] = std::vector<PEParser::ibo32>{ PEParser::ibo32(addr) };
-									++callCount;
+									// If an instruction fails to disassemble,
+									// increment the pointer to traverse memory byte by byte.
+									++fnCur;
 								}
 							}
-							addr += inst.length;
 						}
-						else {
-							// If an instruction fails to disassemble,
-							// increment the pointer to traverse memory byte by byte.
-							++addr;
-						}
-					}
-				}
-				// Iterate over the sections a second time.
-				// This is important for finding thunked functions.
-				// We assume a function is thunked if it is in the map 
-				// and has a 32-bit relative jump that targets it. That is why
-				// we disassemble the calls first, and do a second-over.
-				for (auto& section : *sections) {
-					ZydisDecodedInstruction inst;
-					uint8_t* base = reinterpret_cast<uint8_t*>(PEParser::getProcessInfo()->mInfo->lpBaseOfDll);
-					uint8_t* addr = section->start.as<uint8_t*>();
-					uint8_t* end = section->end.as<uint8_t*>();
-					while (addr < end) {
-						if (decoder->decodeInstruction(addr, inst)) {
-							// 0xE9 - 32-bit relative jump.
-							if (inst.opcode == 0xE9 && inst.length == 5) {
-								PEParser::ibo32 callTarget = PEParser::ibo32(addr + *reinterpret_cast<int*>(addr + 1) + 5);
-								auto iter = rawCalls.find(callTarget);
-								// Add the jump if and only if the target address already exists in the map,
-								// meaning it was targeted by a call. We can be sure this is a thunk.
-								if (iter != rawCalls.end()) {
-									iter->second.push_back(PEParser::ibo32(addr));
-									++callCount;
-								}
-							}
-							addr += inst.length;
-						}
-						else {
-							// If an instruction fails to disassemble,
-							// increment the pointer to traverse memory byte by byte.
-							++addr;
-						}
+						++cur;
 					}
 				}
 				// Insert the section ends to the back of the map.
@@ -349,6 +338,7 @@ namespace CallHook {
 			// Since the map is ordered, we can get the span of elements of a single segment 
 			// by subtracting the current pointer from the pointer of the next map entry.
 			auto next = std::next(prev);
+			if (!prev->second || !next->second) return std::vector<void*>{};
 			std::vector<void*> result;
 			result.reserve((next->second - prev->second) / sizeof(PEParser::ibo32));
 			// Iterate over pointers between the start position of the current entry and the start of the next entry.
